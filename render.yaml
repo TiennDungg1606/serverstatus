@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: cubing-presence-status
+    env: node
+    plan: free
+    rootDir: status
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    healthCheckPath: /healthz
+    envVars:
+      - key: PORT
+        value: "4444"
+      - key: PRESENCE_SECRET
+        sync: false
+      - key: PRESENCE_TTL_MS
+        value: "60000"
+      - key: ALLOW_ORIGINS
+        value: https://your-frontend-domain.example
