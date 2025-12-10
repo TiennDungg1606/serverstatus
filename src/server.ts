@@ -7,16 +7,64 @@ import { z } from "zod";
 import { config } from "./config.js";
 import { InviteStore, type InviteRecord, type InviteStatus } from "./inviteStore.js";
 import { PresenceStore } from "./presenceStore.js";
+import type { PlayerDirectoryChange, UserChangeWatcherHandle } from "./userChangeWatcher.js";
+import { startUserChangeWatcher } from "./userChangeWatcher.js";
 
 const app = express();
 const store = new PresenceStore(config.PRESENCE_TTL_MS);
 const invites = new InviteStore();
 const shouldLogPresence = Boolean(config.LOG_HEARTBEATS);
+const playerDirectoryState = {
+  version: 1,
+  lastChangeAt: null as string | null,
+  lastDocumentId: null as string | null
+};
+let playerDirectoryWatcherHandle: UserChangeWatcherHandle | null = null;
 
 function logPresence(event: "heartbeat" | "offline", payload: Record<string, unknown>) {
   if (!shouldLogPresence) return;
   const timestamp = new Date().toISOString();
   console.info(`[presence][${event}] ${timestamp}`, payload);
+}
+
+function applyPlayerDirectoryChange(change: PlayerDirectoryChange) {
+  playerDirectoryState.version += 1;
+  playerDirectoryState.lastDocumentId = change.documentId ?? null;
+  playerDirectoryState.lastChangeAt = new Date().toISOString();
+  console.info("[playerDirectory] change detected", {
+    version: playerDirectoryState.version,
+    lastDocumentId: playerDirectoryState.lastDocumentId,
+    operationType: change.operationType
+  });
+}
+
+function startPlayerDirectoryWatcher() {
+  if (!config.ENABLE_USER_WATCHER) {
+    return;
+  }
+  if (!config.MONGODB_URI) {
+    console.warn("[playerDirectory] ENABLE_USER_WATCHER is true but MONGODB_URI is missing");
+    return;
+  }
+  playerDirectoryWatcherHandle = startUserChangeWatcher({
+    mongoUri: config.MONGODB_URI,
+    dbName: config.MONGODB_DB,
+    logger: console,
+    onChange: async (change) => {
+      applyPlayerDirectoryChange(change);
+    }
+  });
+}
+
+async function stopPlayerDirectoryWatcher() {
+  if (!playerDirectoryWatcherHandle) return;
+  try {
+    await playerDirectoryWatcherHandle.stop();
+  } catch (error) {
+    console.error("[playerDirectory] Failed to stop watcher", error);
+  } finally {
+    playerDirectoryWatcherHandle = null;
+  }
 }
 
 app.use(express.json({ limit: "10mb" }));
@@ -237,6 +285,19 @@ app.get("/presence/:userId", (req, res) => {
   });
 });
 
+app.get("/players/directory/status", (req, res) => {
+  const sinceParam = typeof req.query.since === "string" ? Number(req.query.since) : undefined;
+  const sinceVersion = Number.isFinite(sinceParam) ? Number(sinceParam) : undefined;
+  const currentVersion = playerDirectoryState.version;
+  const changed = typeof sinceVersion === "number" ? currentVersion > sinceVersion : false;
+  res.json({
+    version: currentVersion,
+    changed,
+    lastChangeAt: playerDirectoryState.lastChangeAt,
+    lastDocumentId: playerDirectoryState.lastDocumentId
+  });
+});
+
 app.get("/friends/invites", requireSecret, (req, res) => {
   const userId = typeof req.query.userId === "string" ? req.query.userId.trim() : "";
   if (!userId) {
@@ -337,7 +398,21 @@ setInterval(() => {
   }
 }, config.CLEANUP_INTERVAL_MS).unref();
 
+startPlayerDirectoryWatcher();
+
 const port = config.PORT;
-app.listen(port, () => {
+const server = app.listen(port, () => {
   console.log(`Presence service listening on port ${port}`);
+});
+
+async function gracefulShutdown(signal: string) {
+  console.info(`[shutdown] Received ${signal}, cleaning up...`);
+  await stopPlayerDirectoryWatcher();
+  server.close(() => {
+    process.exit(0);
+  });
+}
+
+["SIGINT", "SIGTERM"].forEach((signal) => {
+  process.on(signal, () => void gracefulShutdown(signal));
 });

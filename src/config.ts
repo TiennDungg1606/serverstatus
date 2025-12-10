@@ -12,7 +12,10 @@ const envSchema = z.object({
   CLEANUP_INTERVAL_MS: z.coerce.number().default(5_000),
   ALLOW_ORIGINS: z.string().optional(),
   LOG_HEARTBEATS: z.coerce.boolean().default(false),
-  FRIEND_SYNC_URL: z.string().url().optional()
+  FRIEND_SYNC_URL: z.string().url().optional(),
+  ENABLE_USER_WATCHER: z.coerce.boolean().default(false),
+  MONGODB_URI: z.string().optional(),
+  MONGODB_DB: z.string().optional()
 });
 
 const parsed = envSchema.parse(process.env);
