@@ -5,10 +5,12 @@ import type { NextFunction, Request, Response } from "express";
 import { z } from "zod";
 
 import { config } from "./config.js";
+import { InviteStore, type InviteRecord, type InviteStatus } from "./inviteStore.js";
 import { PresenceStore } from "./presenceStore.js";
 
 const app = express();
 const store = new PresenceStore(config.PRESENCE_TTL_MS);
+const invites = new InviteStore();
 const shouldLogPresence = Boolean(config.LOG_HEARTBEATS);
 
 function logPresence(event: "heartbeat" | "offline", payload: Record<string, unknown>) {
@@ -42,6 +44,81 @@ const heartbeatSchema = z.object({
   ttlMs: z.number().int().positive().optional(),
   metadata: z.record(z.union([z.string(), z.number(), z.boolean()])).optional()
 });
+
+const inviteSchema = z.object({
+  requesterId: z.string().min(1),
+  requesterDisplayName: z.string().min(1),
+  requesterAvatar: z.string().optional().nullable(),
+  requesterGoal33: z.string().optional().nullable(),
+  targetUserId: z.string().min(1),
+  targetDisplayName: z.string().min(1),
+  targetAvatar: z.string().optional().nullable(),
+  targetGoal33: z.string().optional().nullable()
+});
+
+const inviteDirectionSchema = z.enum(["incoming", "outgoing", "all"]).default("outgoing");
+const inviteStatusSchema = z.enum(["pending", "accepted", "declined"]).default("pending");
+const inviteStatusUpdateSchema = z.object({
+  status: z.enum(["accepted", "declined"] as const),
+  actorUserId: z.string().min(1)
+});
+
+function serializeInvite(record: InviteRecord, perspectiveUserId: string) {
+  const direction = record.fromUserId === perspectiveUserId ? "outgoing" : "incoming";
+  const peer =
+    direction === "outgoing"
+      ? {
+          userId: record.toUserId,
+          displayName: record.toDisplayName,
+          avatar: record.toAvatar ?? null,
+          goal33: record.toGoal33 ?? null
+        }
+      : {
+          userId: record.fromUserId,
+          displayName: record.fromDisplayName,
+          avatar: record.fromAvatar ?? null,
+          goal33: record.fromGoal33 ?? null
+        };
+
+  return {
+    id: record.id,
+    direction,
+    status: record.status,
+    createdAt: record.createdAt,
+    fromUserId: record.fromUserId,
+    fromDisplayName: record.fromDisplayName,
+    fromAvatar: record.fromAvatar ?? null,
+    fromGoal33: record.fromGoal33 ?? null,
+    toUserId: record.toUserId,
+    toDisplayName: record.toDisplayName,
+    toAvatar: record.toAvatar ?? null,
+    toGoal33: record.toGoal33 ?? null,
+    peer
+  };
+}
+
+async function syncFriendship(record: InviteRecord) {
+  if (!config.FRIEND_SYNC_URL) return;
+  try {
+    const response = await fetch(config.FRIEND_SYNC_URL, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(config.PRESENCE_SECRET ? { "x-presence-secret": config.PRESENCE_SECRET } : {})
+      },
+      body: JSON.stringify({
+        fromUserId: record.fromUserId,
+        toUserId: record.toUserId
+      })
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      console.error("Friend sync failed", response.status, text);
+    }
+  } catch (error) {
+    console.error("Friend sync request errored", error);
+  }
+}
 
 const idsSchema = z
   .string()
@@ -157,6 +234,99 @@ app.get("/presence/:userId", (req, res) => {
     ttlMs: record.ttlMs,
     metadata: record.metadata ?? null
   });
+});
+
+app.get("/friends/invites", requireSecret, (req, res) => {
+  const userId = typeof req.query.userId === "string" ? req.query.userId.trim() : "";
+  if (!userId) {
+    res.status(400).json({ message: "userId is required" });
+    return;
+  }
+
+  const directionParam = typeof req.query.direction === "string" ? req.query.direction : undefined;
+  const directionResult = inviteDirectionSchema.safeParse(directionParam ?? "outgoing");
+  if (!directionResult.success) {
+    res.status(400).json({ message: "Invalid direction" });
+    return;
+  }
+
+  const statusParam = typeof req.query.status === "string" ? req.query.status : "pending";
+  const statusResult = inviteStatusSchema.safeParse(statusParam ?? "pending");
+  if (!statusResult.success) {
+    res.status(400).json({ message: "Invalid status" });
+    return;
+  }
+
+  const direction = directionResult.data;
+  const status = statusResult.data;
+  const records = invites.listForUser(userId, direction, [status]);
+  res.json({
+    invites: records.map((record) => serializeInvite(record, userId))
+  });
+});
+
+app.post("/friends/invite", requireSecret, (req, res) => {
+  const parseResult = inviteSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    res.status(400).json({ message: "Invalid payload", issues: parseResult.error.flatten() });
+    return;
+  }
+
+  const payload = parseResult.data;
+  const record = invites.createInvite({
+    fromUserId: payload.requesterId,
+    fromDisplayName: payload.requesterDisplayName,
+    fromAvatar: payload.requesterAvatar ?? null,
+    fromGoal33: payload.requesterGoal33 ?? null,
+    toUserId: payload.targetUserId,
+    toDisplayName: payload.targetDisplayName,
+    toAvatar: payload.targetAvatar ?? null,
+    toGoal33: payload.targetGoal33 ?? null
+  });
+
+  const outgoing = invites.listForUser(payload.requesterId, "outgoing");
+  res.json({
+    invite: serializeInvite(record, payload.requesterId),
+    invites: outgoing.map((item) => serializeInvite(item, payload.requesterId))
+  });
+});
+
+app.post("/friends/invite/:inviteId/status", requireSecret, async (req, res) => {
+  const inviteId = req.params.inviteId;
+  if (!inviteId) {
+    res.status(400).json({ message: "inviteId is required" });
+    return;
+  }
+
+  const parseResult = inviteStatusUpdateSchema.safeParse(req.body);
+  if (!parseResult.success) {
+    res.status(400).json({ message: "Invalid payload", issues: parseResult.error.flatten() });
+    return;
+  }
+
+  const data = parseResult.data;
+  const record = invites.getById(inviteId);
+  if (!record) {
+    res.status(404).json({ message: "Invite not found" });
+    return;
+  }
+
+  if (record.fromUserId !== data.actorUserId && record.toUserId !== data.actorUserId) {
+    res.status(403).json({ message: "Actor is not part of invite" });
+    return;
+  }
+
+  const updated = invites.updateStatus(inviteId, data.status as InviteStatus);
+  if (!updated) {
+    res.status(500).json({ message: "Failed to update invite" });
+    return;
+  }
+
+  if (data.status === "accepted") {
+    await syncFriendship(updated);
+  }
+
+  res.json({ invite: serializeInvite(updated, data.actorUserId) });
 });
 
 setInterval(() => {

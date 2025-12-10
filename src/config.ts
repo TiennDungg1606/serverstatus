@@ -11,7 +11,8 @@ const envSchema = z.object({
   PRESENCE_TTL_MS: z.coerce.number().default(60_000),
   CLEANUP_INTERVAL_MS: z.coerce.number().default(5_000),
   ALLOW_ORIGINS: z.string().optional(),
-  LOG_HEARTBEATS: z.coerce.boolean().default(false)
+  LOG_HEARTBEATS: z.coerce.boolean().default(false),
+  FRIEND_SYNC_URL: z.string().url().optional()
 });
 
 const parsed = envSchema.parse(process.env);
