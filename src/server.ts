@@ -19,8 +19,8 @@ function logPresence(event: "heartbeat" | "offline", payload: Record<string, unk
   console.info(`[presence][${event}] ${timestamp}`, payload);
 }
 
-app.use(express.json({ limit: "1mb" }));
-app.use(express.urlencoded({ extended: true, limit: "1mb" }));
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 const corsOptions: CorsOptions = {
   origin: (origin, callback) => {
