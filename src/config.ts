@@ -15,7 +15,8 @@ const envSchema = z.object({
   FRIEND_SYNC_URL: z.string().url().optional(),
   ENABLE_USER_WATCHER: z.coerce.boolean().default(false),
   MONGODB_URI: z.string().optional(),
-  MONGODB_DB: z.string().optional()
+  MONGODB_DB: z.string().optional(),
+  WS_PORT: z.coerce.number().optional()
 });
 
 const parsed = envSchema.parse(process.env);
