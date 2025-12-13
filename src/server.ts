@@ -11,7 +11,7 @@ import type { PlayerDirectoryChange, UserChangeWatcherHandle } from "./userChang
 import { startUserChangeWatcher } from "./userChangeWatcher.js";
 
 const app = express();
-const store = new PresenceStore(config.PRESENCE_TTL_MS);
+export const store = new PresenceStore(config.PRESENCE_TTL_MS);
 const invites = new InviteStore();
 const shouldLogPresence = Boolean(config.LOG_HEARTBEATS);
 const playerDirectoryState = {
@@ -416,3 +416,6 @@ async function gracefulShutdown(signal: string) {
 ["SIGINT", "SIGTERM"].forEach((signal) => {
   process.on(signal, () => void gracefulShutdown(signal));
 });
+
+// Start WebSocket server (imported at the end to avoid circular dependency)
+import "./wsServer.js";
