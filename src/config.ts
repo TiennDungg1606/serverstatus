@@ -26,7 +26,8 @@ const allowedOrigins = parsed.ALLOW_ORIGINS
       .filter(Boolean)
   : [];
 
-export const config: EnvShape & { allowedOrigins: string[] } = {
-  ...parsed,
-  allowedOrigins
-};
+  export const config: EnvShape & { allowedOrigins: string[] } = {
+    ...parsed,
+    WS_PORT: process.env.WS_PORT ? Number(process.env.WS_PORT) : 8081,
+    allowedOrigins
+  };
